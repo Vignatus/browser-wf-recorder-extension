@@ -18,18 +18,19 @@ const authPasswordEl = document.getElementById('authPassword');
 const authApiUrlEl  = document.getElementById('authApiUrl');
 const authErrorEl   = document.getElementById('authError');
 const authSignInBtn = document.getElementById('authSignInBtn');
-const authSkipBtn   = document.getElementById('authSkipBtn');
+const mainContent   = document.getElementById('mainContent');
 const userBar       = document.getElementById('userBar');
 const userBarEmail  = document.getElementById('userBarEmail');
 const userBarSignOut = document.getElementById('userBarSignOut');
 
 function showAuthScreen() {
   authScreen.classList.remove('hidden');
-  userBar.classList.add('hidden');
+  mainContent.classList.add('hidden');
 }
 
 function hideAuthScreen(user) {
   authScreen.classList.add('hidden');
+  mainContent.classList.remove('hidden');
   if (user) {
     userBarEmail.textContent = user.email;
     userBar.classList.remove('hidden');
@@ -75,8 +76,6 @@ authSignInBtn.addEventListener('click', async () => {
 // Allow Enter key from the password or API URL field to trigger sign-in
 authPasswordEl.addEventListener('keydown', e => { if (e.key === 'Enter') authSignInBtn.click(); });
 authApiUrlEl.addEventListener('keydown',  e => { if (e.key === 'Enter') authSignInBtn.click(); });
-
-authSkipBtn.addEventListener('click', () => hideAuthScreen(null));
 
 userBarSignOut.addEventListener('click', async () => {
   try { await bg('SIGN_OUT'); } catch {}
@@ -129,7 +128,6 @@ const modalRecDesc      = document.getElementById('modalRecDesc');
 const nameModalSaveBtn  = document.getElementById('nameModalSaveBtn');
 const nameModalCancelBtn = document.getElementById('nameModalCancelBtn');
 const contextMenu    = document.getElementById('contextMenu');
-const ctxDownload    = document.getElementById('ctxDownload');
 const ctxReplay      = document.getElementById('ctxReplay');
 const ctxDelete      = document.getElementById('ctxDelete');
 
@@ -294,18 +292,6 @@ function renderLiveSteps(steps) {
   }).join('');
 }
 
-// ── JSON download ─────────────────────────────────────────────────────────────
-
-function downloadJson(recording) {
-  const blob = new Blob([JSON.stringify(recording, null, 2)], { type: 'application/json' });
-  const url  = URL.createObjectURL(blob);
-  const a    = document.createElement('a');
-  a.href     = url;
-  a.download = (recording.name || 'workflow').replace(/[^a-z0-9]/gi, '_') + '_' + recording.id + '.json';
-  a.click();
-  URL.revokeObjectURL(url);
-}
-
 // ── Polling for record tab ────────────────────────────────────────────────────
 
 function startRecPoll() {
@@ -376,9 +362,8 @@ nameModalSaveBtn.addEventListener('click', async () => {
   const description = modalRecDesc.value.trim();
   nameModal.classList.add('hidden');
   try {
-    const recording = await bg('STOP_RECORDING', { name, description });
+    await bg('STOP_RECORDING', { name, description });
     setStatus('idle', 0);
-    downloadJson(recording);
     const state = await bg('GET_STATE');
     renderRecordings(state.recentRecordings || []);
   } catch (err) {
@@ -437,14 +422,6 @@ recordingsList.addEventListener('click', e => {
 });
 
 document.addEventListener('click', () => contextMenu.classList.add('hidden'));
-
-ctxDownload.addEventListener('click', async () => {
-  if (!contextTarget) return;
-  try {
-    const recording = await bg('GET_RECORDING', { id: contextTarget });
-    if (recording) downloadJson(recording);
-  } catch (err) { alert(err.message); }
-});
 
 ctxReplay.addEventListener('click', () => {
   if (!contextTarget) return;

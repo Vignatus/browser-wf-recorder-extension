@@ -124,24 +124,16 @@ async function syncRecordingToBackend(recording) {
   const { auth } = await chrome.storage.local.get('auth');
   if (!auth?.token) return null;
 
-  const body = {
-    recording: {
+  return apiFetch('/api/recordings', {
+    method: 'POST',
+    body: JSON.stringify({
       name: recording.name,
       description: recording.description || '',
       tags: [],
-      metadata: {
-        localId: recording.id,
-        rawEventCount: recording.rawEventCount,
-        recordedAt: recording.startTime,
-      },
-    },
-    version: {
-      activate: true,
       source: 'extension',
       schemaVersion: '1.0',
-      title: recording.name,
       startUrl: recording.tabUrl,
-      steps: recording.steps,
+      stepCount: recording.steps.length,
       recordingJson: {
         steps: recording.steps,
         startUrl: recording.tabUrl,
@@ -149,13 +141,8 @@ async function syncRecordingToBackend(recording) {
         description: recording.description || '',
       },
       rawEventSummary: { count: recording.rawEventCount },
-      metadata: { localId: recording.id },
-    },
-  };
-
-  return apiFetch('/api/recordings/import', {
-    method: 'POST',
-    body: JSON.stringify(body),
+      metadata: { localId: recording.id, recordedAt: recording.startTime },
+    }),
   });
 }
 
@@ -334,24 +321,33 @@ function sessionMeta() {
 }
 
 async function getState() {
-  const { recordings = [], auth = null } = await chrome.storage.local.get(['recordings', 'auth']);
-  const summaries = recordings.map(r => ({
-    id: r.id,
-    name: r.name,
-    tabUrl: r.tabUrl,
-    startTime: r.startTime,
-    endTime: r.endTime,
-    stepCount: r.stepCount,
-    rawEventCount: r.rawEventCount,
-    remoteId: r.remoteId || null,
-    remoteVersionId: r.remoteVersionId || null,
-    synced: r.synced || false,
-  }));
+  const { auth = null } = await chrome.storage.local.get('auth');
+
+  let allRecordings = [];
+  if (auth?.token) {
+    try {
+      const data = await apiFetch('/api/recordings?limit=50&sort=created_at');
+      allRecordings = (data.recordings || []).map(r => ({
+        id: r.id,
+        name: r.name,
+        tabUrl: r.startUrl || '',
+        startTime: new Date(r.createdAt).getTime(),
+        endTime: new Date(r.updatedAt).getTime(),
+        stepCount: r.stepCount,
+        rawEventCount: r.rawEventSummary?.count || 0,
+        synced: true,
+        remoteId: r.id,
+      }));
+    } catch (err) {
+      console.warn('[WFR] failed to fetch recordings from backend:', err.message);
+    }
+  }
+
   return {
     status: session ? (session.isPaused ? 'paused' : 'recording') : 'idle',
     session: sessionMeta(),
-    recentRecordings: summaries.slice(0, 5),
-    allRecordings: summaries,
+    recentRecordings: allRecordings.slice(0, 5),
+    allRecordings,
     replayState: replay.getState(),
     auth: auth ? { user: auth.user } : null,
   };
@@ -363,11 +359,31 @@ async function getLiveSteps() {
 }
 
 async function deleteRecording(id) {
+  const { auth } = await chrome.storage.local.get('auth');
+  if (auth?.token) {
+    await apiFetch(`/api/recordings/${id}`, { method: 'DELETE' });
+  }
   const { recordings = [] } = await chrome.storage.local.get('recordings');
-  await chrome.storage.local.set({ recordings: recordings.filter(r => r.id !== id) });
+  await chrome.storage.local.set({
+    recordings: recordings.filter(r => r.id !== id && r.remoteId !== id),
+  });
 }
 
 async function getRecording(id) {
+  const { auth } = await chrome.storage.local.get('auth');
+  if (auth?.token) {
+    const data = await apiFetch(`/api/recordings/${id}`);
+    const rec = data.recording;
+    return {
+      id: rec.id,
+      name: rec.name,
+      tabUrl: rec.startUrl || '',
+      startTime: new Date(rec.createdAt).getTime(),
+      stepCount: rec.stepCount,
+      steps: Array.isArray(rec.recordingJson?.steps) ? rec.recordingJson.steps : [],
+      remoteId: rec.id,
+    };
+  }
   const { recordings = [] } = await chrome.storage.local.get('recordings');
   return recordings.find(r => r.id === id) || null;
 }
@@ -392,11 +408,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         if (!rec) throw new Error('Recording not found.');
         const replayResult = await replay.start(rec, message.payload.options ?? {});
 
-        // Create remote replay entry if the recording is synced
-        if (rec.remoteId) {
+        // Create remote replay entry (rec.id is the DB UUID since we fetch from API)
+        const remoteRecordingId = rec.remoteId || rec.id;
+        if (remoteRecordingId) {
           const { auth } = await chrome.storage.local.get('auth');
           if (auth?.token) {
-            createRemoteReplay(rec.remoteId, rec.remoteVersionId ?? null)
+            createRemoteReplay(remoteRecordingId, null)
               .then(remoteReplay => { pendingReplaySync = { remoteReplayId: remoteReplay.id }; })
               .catch(err => console.warn('[WFR] failed to create remote replay:', err.message));
           }

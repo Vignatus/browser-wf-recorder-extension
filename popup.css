@@ -32,6 +32,8 @@ body {
 
 button { cursor: pointer; border: none; background: none; font: inherit; color: inherit; }
 
+.hidden { display: none !important; }
+
 /* ── Popup wrapper ────────────────────────────────────────────────────────── */
 .popup {
   display: flex;
