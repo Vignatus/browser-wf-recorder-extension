@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "Workflow Recorder",
+  "version": "1.0.0",
+  "description": "Record and replay browser workflows with CDP and DOM event capture.",
+  "permissions": [
+    "tabs",
+    "scripting",
+    "storage",
+    "debugger",
+    "webNavigation",
+    "activeTab",
+    "downloads"
+  ],
+  "host_permissions": ["<all_urls>"],
+  "action": {
+    "default_title": "Workflow Recorder",
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  }
+}
