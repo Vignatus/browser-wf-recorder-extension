@@ -35,9 +35,10 @@ export function normalizeEvents(rawEvents) {
         stepType: 'type',
         timestamp: evt.timestamp,
         url: evt.tabUrl,
-        selector,
+        selector: evt.data.target?.primarySelector ?? selector,
         label: evt.data.label,
         value: finalValue,
+        target: evt.data.target ?? null,
         metadata: { inputType: evt.data.inputType },
       });
       i = j;
@@ -79,13 +80,14 @@ export function normalizeEvents(rawEvents) {
         stepType: 'click',
         timestamp: evt.timestamp,
         url: evt.tabUrl,
-        selector: evt.data.selector,
+        selector: evt.data.target?.primarySelector ?? evt.data.selector,
         label: evt.data.label,
+        target: evt.data.target ?? null,
         metadata: {
-          tagName: evt.data.tagName,
-          role: evt.data.role,
-          href: evt.data.href,
-          coordinates: evt.data.coordinates,
+          tagName:     evt.data.tagName     ?? evt.data.target?.tagName,
+          role:        evt.data.role        ?? evt.data.target?.role,
+          href:        evt.data.href        ?? evt.data.target?.href,
+          coordinates: evt.data.coordinates ?? evt.data.target?.fallbackCoordinates,
         },
       });
       i++;
@@ -99,9 +101,10 @@ export function normalizeEvents(rawEvents) {
         stepType: 'select',
         timestamp: evt.timestamp,
         url: evt.tabUrl,
-        selector: evt.data.selector,
+        selector: evt.data.target?.primarySelector ?? evt.data.selector,
         label: evt.data.label,
         value: evt.data.value,
+        target: evt.data.target ?? null,
         metadata: { selectedText: evt.data.selectedText },
       });
       i++;
@@ -115,9 +118,10 @@ export function normalizeEvents(rawEvents) {
         stepType: 'check',
         timestamp: evt.timestamp,
         url: evt.tabUrl,
-        selector: evt.data.selector,
+        selector: evt.data.target?.primarySelector ?? evt.data.selector,
         label: evt.data.label,
         value: evt.data.checked ? 'checked' : 'unchecked',
+        target: evt.data.target ?? null,
         metadata: { checked: evt.data.checked },
       });
       i++;
@@ -131,9 +135,10 @@ export function normalizeEvents(rawEvents) {
         stepType: 'select_radio',
         timestamp: evt.timestamp,
         url: evt.tabUrl,
-        selector: evt.data.selector,
+        selector: evt.data.target?.primarySelector ?? evt.data.selector,
         label: evt.data.label,
         value: evt.data.value,
+        target: evt.data.target ?? null,
       });
       i++;
       continue;

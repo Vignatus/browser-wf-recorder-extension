@@ -168,7 +168,6 @@ export class ReplayEngine {
     } catch (err) {
       entry.status = 'fail';
       entry.detail = err.message;
-      // Screenshot on failure for debugging
       try {
         const { data } = await chrome.debugger.sendCommand(
           { tabId: this.tabId }, 'Page.captureScreenshot', { format: 'jpeg', quality: 60 }
@@ -180,18 +179,19 @@ export class ReplayEngine {
 
   _stepLabel(step) {
     const h = u => { try { return new URL(u).hostname || u; } catch { return u || ''; } };
+    const t = step.target;
     switch (step.stepType) {
-      case 'navigate':    return 'Navigated to ' + h(step.url);
-      case 'click':       return 'Clicked ' + (step.label ? `"${step.label}"` : step.selector);
-      case 'type':        return `Typed "${step.value || ''}" into ${step.label || step.selector}`;
+      case 'navigate':     return 'Navigated to ' + h(step.url);
+      case 'click':        return 'Clicked ' + (step.label ? `"${step.label}"` : (t?.text || t?.ariaLabel || step.selector));
+      case 'type':         return `Typed "${step.value || ''}" into ${step.label || t?.placeholder || step.selector}`;
       case 'select':
-      case 'select_radio':return 'Selected "' + (step.metadata?.selectedText || step.value || '') + '"';
-      case 'check':       return (step.value === 'checked' ? 'Checked' : 'Unchecked') + ' ' + (step.label || step.selector);
-      case 'scroll':      return `Scrolled to (${step.metadata?.x ?? 0}, ${step.metadata?.y ?? 0})`;
+      case 'select_radio': return 'Selected "' + (step.metadata?.selectedText || step.value || '') + '"';
+      case 'check':        return (step.value === 'checked' ? 'Checked' : 'Unchecked') + ' ' + (step.label || step.selector);
+      case 'scroll':       return `Scrolled to (${step.metadata?.x ?? 0}, ${step.metadata?.y ?? 0})`;
       case 'network_request': return (step.metadata?.method || 'GET') + ' ' + (step.metadata?.requestUrl || '');
-      case 'tab_opened':  return 'Tab opened: ' + h(step.url);
-      case 'tab_closed':  return 'Tab closed';
-      default:            return step.stepType;
+      case 'tab_opened':   return 'Tab opened: ' + h(step.url);
+      case 'tab_closed':   return 'Tab closed';
+      default:             return step.stepType;
     }
   }
 
@@ -204,38 +204,54 @@ export class ReplayEngine {
 
   async _doClick(step) {
     const pos = await this._findElement(step);
-    if (!pos) throw new Error(
-      `Element not found (all 3 strategies failed)\n  selector: "${step.selector}"\n  label: "${step.label}"`
-    );
+    if (!pos) {
+      const t = step.target;
+      const tried = _selectorList(step).join(', ') || step.selector;
+      throw new Error(
+        `Element not found — all strategies failed\n` +
+        `  CSS selectors: [${tried}]\n` +
+        `  XPath: "${t?.xpath ?? ''}"\n` +
+        `  text: "${t?.text || step.label}"`
+      );
+    }
     await this._mouseClick(pos.x, pos.y);
     await sleep(200);
   }
 
   async _doType(step) {
-    const ok = await this._runInPage((selector, label) => {
+    const selectors  = _selectorList(step);
+    const label      = step.target?.text || step.target?.ariaLabel || step.label || '';
+    const placeholder = step.target?.placeholder || '';
+
+    const ok = await this._runInPage((selectors, label, placeholder) => {
       let el = null;
-      try { el = document.querySelector(selector); } catch {}
+      for (const sel of selectors) {
+        try { el = document.querySelector(sel); } catch {}
+        if (el) break;
+      }
       if (!el) {
-        const lc = label?.toLowerCase() ?? '';
+        const lc = label?.toLowerCase()       ?? '';
+        const pc = placeholder?.toLowerCase() ?? '';
         el = [...document.querySelectorAll('input:not([type=hidden]):not([type=password]), textarea')]
           .find(e =>
-            (e.placeholder?.toLowerCase() === lc) ||
-            (e.getAttribute('aria-label')?.toLowerCase() === lc)
+            (pc && e.placeholder?.toLowerCase()              === pc) ||
+            (lc && e.getAttribute('aria-label')?.toLowerCase() === lc) ||
+            (lc && e.placeholder?.toLowerCase()              === lc)
           ) ?? null;
       }
       if (!el) return false;
       el.focus();
-      // React-compatible clear via native value setter
       const proto = el instanceof HTMLTextAreaElement
-        ? HTMLTextAreaElement.prototype
-        : HTMLInputElement.prototype;
+        ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
       const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
       if (setter) { setter.call(el, ''); el.dispatchEvent(new Event('input', { bubbles: true })); }
       else el.value = '';
       return true;
-    }, [step.selector, step.label || '']);
+    }, [selectors, label, placeholder]);
 
-    if (!ok) throw new Error(`Input field not found\n  selector: "${step.selector}"\n  label: "${step.label}"`);
+    if (!ok) throw new Error(
+      `Input field not found\n  selectors: [${selectors.join(', ')}]\n  label: "${label}"`
+    );
 
     await chrome.debugger.sendCommand({ tabId: this.tabId }, 'Input.insertText', {
       text: step.value || '',
@@ -244,11 +260,17 @@ export class ReplayEngine {
   }
 
   async _doSelect(step) {
-    const result = await this._runInPage((selector, value, selectedText) => {
+    const selectors = _selectorList(step);
+    const label     = step.target?.ariaLabel || step.label || '';
+
+    const result = await this._runInPage((selectors, value, selectedText, label) => {
       let el = null;
-      try { el = document.querySelector(selector); } catch {}
+      for (const sel of selectors) {
+        try { el = document.querySelector(sel); } catch {}
+        if (el) break;
+      }
       if (!el) {
-        const lc = selectedText?.toLowerCase() ?? '';
+        const lc = label?.toLowerCase() ?? '';
         el = [...document.querySelectorAll('select')].find(e =>
           e.getAttribute('aria-label')?.toLowerCase().includes(lc)
         ) ?? null;
@@ -256,27 +278,36 @@ export class ReplayEngine {
       if (!el) return 'not_found';
       const opt =
         [...el.options].find(o => o.value === value) ||
-        [...el.options].find(o => o.text === selectedText);
+        [...el.options].find(o => o.text  === selectedText);
       if (!opt) return 'option_not_found';
       el.value = opt.value;
       el.dispatchEvent(new Event('change', { bubbles: true }));
       return 'ok';
-    }, [step.selector, step.value || '', step.metadata?.selectedText || '']);
+    }, [selectors, step.value || '', step.metadata?.selectedText || '', label]);
 
-    if (result !== 'ok') throw new Error(`Select failed (${result}): "${step.selector}"`);
+    if (result !== 'ok') throw new Error(
+      `Select failed (${result})\n  selectors: [${selectors.join(', ')}]`
+    );
   }
 
   async _doCheck(step) {
+    const selectors    = _selectorList(step);
     const targetChecked = step.metadata?.checked ?? (step.value === 'checked');
-    const ok = await this._runInPage((selector, target) => {
-      let el = null;
-      try { el = document.querySelector(selector); } catch {}
-      if (!el) return false;
-      if (el.checked !== target) el.click();
-      return true;
-    }, [step.selector, targetChecked]);
 
-    if (!ok) throw new Error(`Checkbox not found: "${step.selector}"`);
+    const ok = await this._runInPage((selectors, target) => {
+      for (const sel of selectors) {
+        let el;
+        try { el = document.querySelector(sel); } catch { continue; }
+        if (!el) continue;
+        if (el.checked !== target) el.click();
+        return true;
+      }
+      return false;
+    }, [selectors, targetChecked]);
+
+    if (!ok) throw new Error(
+      `Checkbox not found\n  selectors: [${selectors.join(', ')}]`
+    );
   }
 
   async _doScroll(step) {
@@ -287,50 +318,95 @@ export class ReplayEngine {
     await sleep(500);
   }
 
-  // ── Element finding — 3-strategy fallback ───────────────────────────────────
+  // ── Element finding — priority-ordered locator fallback chain ───────────────
+  //
+  // Priority:  CSS selectors (in order) → XPath → text/role match → coordinates
+  //
+  // The `target` object holds locators ordered from most to least stable:
+  //   1. data-testid selector
+  //   2. #id selector
+  //   3. [aria-label="..."] selector
+  //   4. input[name="..."] selector
+  //   5. input[placeholder="..."] selector
+  //   6. a[href="..."] selector
+  //   7. CSS path selector (getSelector fallback)
+  //   8. XPath (attribute-based or text-based)
+  //   9. Text / aria / role content search
+  //   10. Recorded coordinates
 
   async _findElement(step) {
-    // 1. Stable CSS selector
-    const r1 = await this._runInPage(selector => {
-      let el = null;
-      try { el = document.querySelector(selector); } catch { return null; }
-      if (!el) return null;
-      const r = el.getBoundingClientRect();
-      if (r.width === 0 && r.height === 0) return null;
-      return { x: r.left + r.width / 2, y: r.top + r.height / 2, strategy: 'selector' };
-    }, [step.selector]);
-    if (r1) return r1;
+    const t = step.target;
 
-    // 2. Text / aria-label / role match
-    const label = step.label || '';
-    if (label) {
-      const r2 = await this._runInPage(label => {
+    // ── Strategy 1: CSS selectors (all tried in one page call) ──────────────
+    const selectors = _selectorList(step);
+    if (selectors.length > 0) {
+      const r = await this._runInPage(selectors => {
+        for (const sel of selectors) {
+          let el;
+          try { el = document.querySelector(sel); } catch { continue; }
+          if (!el) continue;
+          const rect = el.getBoundingClientRect();
+          if (rect.width === 0 && rect.height === 0) continue;
+          return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, strategy: 'css:' + sel };
+        }
+        return null;
+      }, [selectors]);
+      if (r) return r;
+    }
+
+    // ── Strategy 2: XPath ────────────────────────────────────────────────────
+    if (t?.xpath) {
+      const r = await this._runInPage(xpath => {
+        try {
+          const res = document.evaluate(
+            xpath, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null
+          );
+          const el = res.singleNodeValue;
+          if (!el) return null;
+          const rect = el.getBoundingClientRect();
+          if (rect.width === 0 && rect.height === 0) return null;
+          return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, strategy: 'xpath' };
+        } catch { return null; }
+      }, [t.xpath]);
+      if (r) return r;
+    }
+
+    // ── Strategy 3: Text / aria-label / role match ───────────────────────────
+    const label = t?.text || t?.ariaLabel || step.label || '';
+    const role  = t?.role || '';
+    if (label || role) {
+      const r = await this._runInPage((label, role) => {
         const norm = s => s?.toLowerCase().trim() ?? '';
-        const target = norm(label);
+        const targetText = norm(label);
+        const targetRole = norm(role);
         const candidates = [
           ...document.querySelectorAll(
             'a, button, input, select, textarea, [role="button"], [role="link"], [role="checkbox"], [role="radio"], [role="menuitem"], [role="option"]'
           ),
         ];
         const el = candidates.find(e => {
+          if (targetRole && norm(e.getAttribute('role') ?? '') !== targetRole) return false;
+          if (!targetText) return true;
           const texts = [
             e.getAttribute('aria-label'),
             e.textContent,
             e.getAttribute('placeholder'),
             e.getAttribute('title'),
           ];
-          return texts.some(t => norm(t) === target || (target.length > 3 && norm(t).includes(target)));
+          return texts.some(
+            t => norm(t) === targetText || (targetText.length > 3 && norm(t).includes(targetText))
+          );
         });
         if (!el) return null;
-        const r = el.getBoundingClientRect();
-        if (r.width === 0 && r.height === 0) return null;
-        return { x: r.left + r.width / 2, y: r.top + r.height / 2, strategy: 'text_match' };
-      }, [label]);
-      if (r2) return r2;
+        const rect = el.getBoundingClientRect();
+        if (rect.width === 0 && rect.height === 0) return null;
+        return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, strategy: 'text_match' };
+      }, [label, role]);
+      if (r) return r;
     }
 
-    // 3. Recorded coordinates
-    const coords = step.metadata?.coordinates;
+    // ── Strategy 4: Recorded coordinates ─────────────────────────────────────
+    const coords = t?.fallbackCoordinates ?? step.metadata?.coordinates;
     if (coords?.x != null && coords?.y != null) {
       return { x: coords.x, y: coords.y, strategy: 'coordinates' };
     }
@@ -369,6 +445,15 @@ export class ReplayEngine {
       await sleep(300);
     }
   }
+}
+
+// Build the ordered CSS selector list for a step, deduplicating while preserving order.
+// `target.cssSelectors` is already ordered best-first; `step.selector` is appended only
+// if not already present (backward compat for recordings that lack a `target`).
+function _selectorList(step) {
+  const selectors = [...(step.target?.cssSelectors ?? [])];
+  if (step.selector && !selectors.includes(step.selector)) selectors.push(step.selector);
+  return selectors;
 }
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
