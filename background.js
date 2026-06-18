@@ -17,10 +17,13 @@ replay.onDone = async (state) => {
   if (!pendingReplaySync) return;
   const { remoteReplayId } = pendingReplaySync;
   pendingReplaySync = null;
-  try {
-    await finalizeRemoteReplay(remoteReplayId, state);
-  } catch (err) {
-    console.warn('[WFR] failed to sync replay result:', err.message);
+
+  await finalizeRemoteReplay(remoteReplayId, state)
+    .catch(err => console.warn('[WFR] failed to finalize replay:', err.message));
+
+  if (state.log && state.log.length > 0) {
+    await postReplayEvents(remoteReplayId, state.log)
+      .catch(err => console.warn('[WFR] failed to post replay events:', err.message));
   }
 };
 
@@ -173,6 +176,23 @@ async function finalizeRemoteReplay(replayId, state) {
       },
       error: state.error ? { message: state.error } : null,
     }),
+  });
+}
+
+async function postReplayEvents(replayId, log) {
+  const events = log.map((entry, i) => {
+    const payload = { label: entry.label, status: entry.status };
+    if (entry.detail) payload.detail = entry.detail;
+    return {
+      sequence:  entry.idx ?? i,
+      type:      entry.stepType || 'unknown',
+      timestamp: new Date(entry.timestamp).toISOString(),
+      payload,
+    };
+  });
+  await apiFetch(`/api/replays/${replayId}/events`, {
+    method: 'POST',
+    body: JSON.stringify({ events }),
   });
 }
 
@@ -406,20 +426,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         if (session) throw new Error('Stop the active recording before starting a replay.');
         const rec = await getRecording(message.payload.recordingId);
         if (!rec) throw new Error('Recording not found.');
-        const replayResult = await replay.start(rec, message.payload.options ?? {});
 
-        // Create remote replay entry (rec.id is the DB UUID since we fetch from API)
+        // Create the remote replay row before starting so pendingReplaySync is
+        // guaranteed to be set before onDone can fire.
         const remoteRecordingId = rec.remoteId || rec.id;
         if (remoteRecordingId) {
           const { auth } = await chrome.storage.local.get('auth');
           if (auth?.token) {
-            createRemoteReplay(remoteRecordingId, null)
-              .then(remoteReplay => { pendingReplaySync = { remoteReplayId: remoteReplay.id }; })
-              .catch(err => console.warn('[WFR] failed to create remote replay:', err.message));
+            try {
+              const remoteReplay = await createRemoteReplay(remoteRecordingId, null);
+              pendingReplaySync = { remoteReplayId: remoteReplay.id };
+            } catch (err) {
+              console.warn('[WFR] failed to create remote replay:', err.message);
+            }
           }
         }
 
-        return replayResult;
+        return replay.start(rec, message.payload.options ?? {});
       }
 
       case 'PAUSE_REPLAY':      return replay.pause();
