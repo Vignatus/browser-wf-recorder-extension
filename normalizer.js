@@ -118,6 +118,7 @@ export function normalizeEvents(rawEvents) {
         selector: evt.data.selector,
         label: evt.data.label,
         value: evt.data.checked ? 'checked' : 'unchecked',
+        metadata: { checked: evt.data.checked },
       });
       i++;
       continue;

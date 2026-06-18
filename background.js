@@ -2,7 +2,11 @@
 // Owns the recording session, attaches CDP via chrome.debugger,
 // receives DOM events from content.js, and persists finished recordings.
 
-import { normalizeEvents } from './normalizer.js';
+import { normalizeEvents }   from './normalizer.js';
+import { ReplayEngine }     from './replay.js';
+import { sanitizeRecording } from './sanitizer.js';
+
+const replay = new ReplayEngine();
 
 // ── In-memory session ────────────────────────────────────────────────────────
 // Lost on service-worker restart, but the popup keeps it alive via 500 ms polls
@@ -168,12 +172,16 @@ async function stopRecording(silent = false) {
     rawEvents: snap.rawEvents,
   };
 
+  // Sanitize credentials before writing to storage — headers, POST bodies,
+  // and auth query params must not be persisted (see sanitizer.js for rationale).
+  const sanitized = sanitizeRecording(recording);
+
   // Persist to local storage (keep last 50)
   const { recordings = [] } = await chrome.storage.local.get('recordings');
-  recordings.unshift(recording);
+  recordings.unshift(sanitized);
   await chrome.storage.local.set({ recordings: recordings.slice(0, 50) });
 
-  return recording;
+  return sanitized;
 }
 
 function sessionMeta() {
@@ -193,18 +201,21 @@ function sessionMeta() {
 
 async function getState() {
   const { recordings = [] } = await chrome.storage.local.get('recordings');
+  const summaries = recordings.map(r => ({
+    id: r.id,
+    name: r.name,
+    tabUrl: r.tabUrl,
+    startTime: r.startTime,
+    endTime: r.endTime,
+    stepCount: r.stepCount,
+    rawEventCount: r.rawEventCount,
+  }));
   return {
     status: session ? (session.isPaused ? 'paused' : 'recording') : 'idle',
     session: sessionMeta(),
-    recentRecordings: recordings.slice(0, 5).map(r => ({
-      id: r.id,
-      name: r.name,
-      tabUrl: r.tabUrl,
-      startTime: r.startTime,
-      endTime: r.endTime,
-      stepCount: r.stepCount,
-      rawEventCount: r.rawEventCount,
-    })),
+    recentRecordings: summaries.slice(0, 5),
+    allRecordings: summaries,
+    replayState: replay.getState(),
   };
 }
 
@@ -236,6 +247,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       case 'GET_LIVE_STEPS':    return getLiveSteps();
       case 'DELETE_RECORDING':  return deleteRecording(message.payload.id);
       case 'GET_RECORDING':     return getRecording(message.payload.id);
+      case 'START_REPLAY': {
+        if (session) throw new Error('Stop the active recording before starting a replay.');
+        const rec = await getRecording(message.payload.recordingId);
+        if (!rec) throw new Error('Recording not found.');
+        return replay.start(rec, message.payload.options ?? {});
+      }
+      case 'PAUSE_REPLAY':      return replay.pause();
+      case 'RESUME_REPLAY':     return replay.resume();
+      case 'STOP_REPLAY':       return replay.stop();
+      case 'STEP_REPLAY':       return replay.stepOnce();
+      case 'GET_REPLAY_STATE':  return replay.getState();
       case 'DOM_EVENT': {
         // Validate the message came from the tab we are recording
         if (sender.tab && session && sender.tab.id === session.tabId) {
