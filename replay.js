@@ -2,13 +2,44 @@
 
 const SPEED_DELAYS = { '0.5x': 2000, '1x': 1000, '2x': 500, '4x': 250 };
 
+// ── URL normalization ────────────────────────────────────────────────────────
+// Strip tracking/session params before URL comparisons so assertions don't
+// break on incidental query noise added by ad networks or analytics.
+
+const NOISY_PARAMS = new Set([
+  'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content',
+  'gclid', 'fbclid', 'session', 'timestamp',
+]);
+
+function normalizeUrl(url) {
+  try {
+    const u = new URL(url);
+    for (const key of [...u.searchParams.keys()]) {
+      if (NOISY_PARAMS.has(key)) u.searchParams.delete(key);
+    }
+    return u.toString();
+  } catch { return url; }
+}
+
+function getUrlParts(url) {
+  try {
+    const u = new URL(url);
+    for (const key of [...u.searchParams.keys()]) {
+      if (NOISY_PARAMS.has(key)) u.searchParams.delete(key);
+    }
+    return { pathname: u.pathname, params: u.searchParams };
+  } catch { return { pathname: '', params: new URLSearchParams() }; }
+}
+
 export class ReplayEngine {
   constructor() {
+    this.onDone = null; // optional callback: (state) => void, called when replay reaches 'done'
     this._reset();
   }
 
   _reset() {
     this.state     = 'idle';  // idle | running | paused | done
+    this.status    = null;    // null | 'success' | 'failed'  (final replay result)
     this.steps     = [];
     this.index     = 0;
     this.tabId     = null;
@@ -18,16 +49,26 @@ export class ReplayEngine {
     this._startedAt = 0;
     this._stepGate  = null;   // Promise.resolve fn used in step-by-step mode
     this._running   = false;
+    this.finalUrl          = null;
+    this.assertionResults  = [];
+    this.failedStepIndex   = null;
+    this.error             = null;
+    this.finalAssertions   = [];
   }
 
   getState() {
     return {
-      state:   this.state,
-      index:   this.index,
-      total:   this.steps.length,
-      elapsed: this._startedAt ? Date.now() - this._startedAt : 0,
-      log:     this.log,
-      options: this.options,
+      state:            this.state,
+      status:           this.status,
+      index:            this.index,
+      total:            this.steps.length,
+      elapsed:          this._startedAt ? Date.now() - this._startedAt : 0,
+      log:              this.log,
+      options:          this.options,
+      finalUrl:         this.finalUrl,
+      assertionResults: this.assertionResults,
+      failedStepIndex:  this.failedStepIndex,
+      error:            this.error,
     };
   }
 
@@ -37,8 +78,9 @@ export class ReplayEngine {
     if (this.state !== 'idle') await this.stop();
     this._reset();
 
-    this.steps   = recording.steps ?? [];
-    this.options = { ...this.options, ...options };
+    this.steps           = recording.steps ?? [];
+    this.finalAssertions = recording.finalAssertions ?? [];
+    this.options         = { ...this.options, ...options };
 
     if (this.steps.length === 0) throw new Error('Recording has no steps to replay.');
 
@@ -59,7 +101,10 @@ export class ReplayEngine {
 
     // Fire-and-forget; kept alive by popup polling
     this._loop().catch(err => {
-      this.state = 'idle';
+      this.state  = 'done';
+      this.status = 'failed';
+      this.error  = err.message;
+      if (this.onDone) this.onDone(this.getState());
       console.error('[WFR replay] loop error:', err);
     });
 
@@ -77,13 +122,20 @@ export class ReplayEngine {
   }
 
   async stop() {
-    this.state = 'idle';
+    const midReplay = this.state === 'running' || this.state === 'paused';
+    this.state = 'idle'; // causes _loop() to break on its next iteration check
     if (this._stepGate) { this._stepGate(); this._stepGate = null; }
     if (this._attached && this.tabId) {
       await chrome.debugger.detach({ tabId: this.tabId }).catch(() => {});
       this._attached = false;
     }
     this._reset();
+    if (midReplay) {
+      this.state  = 'done';
+      this.status = 'failed';
+      this.error  = 'Replay stopped before completion';
+      if (this.onDone) this.onDone(this.getState());
+    }
     return this.getState();
   }
 
@@ -106,24 +158,45 @@ export class ReplayEngine {
 
     while (this.index < this.steps.length) {
       while (this.state === 'paused') await sleep(150);
-      if (this.state === 'idle') break;
+      if (this.state === 'idle' || this.state === 'done') break; // manual stop
 
       if (this.options.mode === 'step') {
         await new Promise(r => { this._stepGate = r; });
-        if (this.state === 'idle') break;
+        if (this.state === 'idle' || this.state === 'done') break;
       }
 
-      await this._executeStep(this.steps[this.index], this.index);
+      const result = await this._executeStep(this.steps[this.index], this.index);
       this.index++;
+
+      if (!result.ok) {
+        this.failedStepIndex = this.index - 1;
+        this.error           = result.error;
+        this.status          = 'failed';
+        break;
+      }
 
       if (this.options.mode === 'full' && this.index < this.steps.length && this.state === 'running') {
         await sleep(delay);
       }
     }
 
+    // Natural completion (not aborted by stop()): evaluate final assertions
     if (this.state === 'running' || this.state === 'paused') {
+      if (this.status !== 'failed') {
+        const allPassed = await this._evaluateFinalAssertions();
+        if (this.finalAssertions.length === 0) {
+          this.status = 'failed';
+          this.error  = 'No final assertions defined — cannot confirm workflow completed.';
+        } else if (!allPassed) {
+          this.status = 'failed';
+        } else {
+          this.status = 'success';
+        }
+      }
       this.state = 'done';
+      if (this.onDone) this.onDone(this.getState());
     }
+
     if (this._attached && this.tabId) {
       await chrome.debugger.detach({ tabId: this.tabId }).catch(() => {});
       this._attached = false;
@@ -159,12 +232,13 @@ export class ReplayEngine {
         case 'tab_closed':
           entry.status = 'skip';
           entry.detail = 'Observational step — skipped';
-          return;
+          return { ok: true, skipped: true };
         default:
           entry.status = 'skip';
-          return;
+          return { ok: true, skipped: true };
       }
       entry.status = 'ok';
+      return { ok: true };
     } catch (err) {
       entry.status = 'fail';
       entry.detail = err.message;
@@ -174,6 +248,7 @@ export class ReplayEngine {
         );
         entry.screenshot = 'data:image/jpeg;base64,' + data;
       } catch {}
+      return { ok: false, error: err.message };
     }
   }
 
@@ -316,6 +391,88 @@ export class ReplayEngine {
       return true;
     }, [step.metadata?.x ?? 0, step.metadata?.y ?? 0]);
     await sleep(500);
+  }
+
+  // ── Final assertion evaluation ───────────────────────────────────────────────
+
+  async _evaluateFinalAssertions() {
+    const tab = await chrome.tabs.get(this.tabId).catch(() => null);
+    this.finalUrl = tab?.url ?? null;
+
+    const results = [];
+    let allPassed = true;
+
+    for (const assertion of this.finalAssertions) {
+      const result = await this._evaluateAssertion(assertion);
+      results.push(result);
+      if (!result.passed) allPassed = false;
+    }
+
+    this.assertionResults = results;
+    return allPassed;
+  }
+
+  async _evaluateAssertion(assertion) {
+    const { type, value, selector } = assertion;
+    const parts = this.finalUrl
+      ? getUrlParts(this.finalUrl)
+      : { pathname: '', params: new URLSearchParams() };
+
+    try {
+      switch (type) {
+        case 'path_equals': {
+          const passed = parts.pathname === value;
+          return { type, passed, expected: value, actual: parts.pathname,
+            message: passed ? 'Path matches' : `Expected path "${value}", got "${parts.pathname}"` };
+        }
+        case 'path_contains': {
+          const passed = parts.pathname.includes(value);
+          return { type, passed, expected: value, actual: parts.pathname,
+            message: passed ? 'Path contains expected value' : `Path "${parts.pathname}" does not contain "${value}"` };
+        }
+        case 'url_regex': {
+          const normalized = this.finalUrl ? normalizeUrl(this.finalUrl) : '';
+          const passed = new RegExp(value).test(normalized);
+          return { type, passed, expected: value, actual: normalized,
+            message: passed ? 'URL matches regex' : `URL "${normalized}" does not match regex "${value}"` };
+        }
+        case 'query_param_exists': {
+          const passed = parts.params.has(value);
+          return { type, passed, expected: value, actual: parts.params.toString(),
+            message: passed ? `Query param "${value}" exists` : `Query param "${value}" not found` };
+        }
+        case 'query_param_equals': {
+          const [paramName, paramValue] = (value || '').split('=');
+          const actual = parts.params.get(paramName);
+          const passed = actual === paramValue;
+          return { type, passed, expected: `${paramName}=${paramValue}`, actual: `${paramName}=${actual}`,
+            message: passed ? 'Query param matches' : `Expected "${paramName}=${paramValue}", got "${paramName}=${actual}"` };
+        }
+        case 'element_visible': {
+          const found = await this._runInPage(sel => {
+            const el = document.querySelector(sel);
+            if (!el) return false;
+            const rect = el.getBoundingClientRect();
+            return rect.width > 0 && rect.height > 0;
+          }, [selector]);
+          return { type, passed: !!found, expected: selector, actual: found ? 'visible' : 'not visible',
+            message: found ? `Element "${selector}" is visible` : `Element "${selector}" not found or not visible` };
+        }
+        case 'element_text_visible': {
+          const found = await this._runInPage(text => {
+            const pageText = document.body?.innerText?.replace(/\s+/g, ' ').toLowerCase() ?? '';
+            return pageText.includes(text.toLowerCase());
+          }, [value]);
+          return { type, passed: !!found, expected: value, actual: found ? 'found' : 'not found',
+            message: found ? `Text "${value}" found on page` : `Text "${value}" not found on page` };
+        }
+        default:
+          return { type, passed: false, expected: null, actual: null,
+            message: `Unknown assertion type: "${type}"` };
+      }
+    } catch (err) {
+      return { type, passed: false, expected: value ?? selector ?? null, actual: null, message: err.message };
+    }
   }
 
   // ── Element finding — priority-ordered locator fallback chain ───────────────

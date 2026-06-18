@@ -8,6 +8,35 @@
   <body>
     <div class="popup">
 
+      <!-- ── Auth screen ────────────────────────────────────────────────── -->
+      <div class="auth-screen hidden" id="authScreen">
+        <div class="auth-logo">
+          <svg width="40" height="40" viewBox="0 0 24 24" fill="none">
+            <circle cx="12" cy="12" r="9" stroke="rgba(255,255,255,0.15)" stroke-width="1.5"/>
+            <circle cx="12" cy="12" r="5" fill="#ef4444"/>
+          </svg>
+        </div>
+        <h2 class="auth-title">Sign in</h2>
+        <p class="auth-subtitle">Connect to your backend to sync recordings and replays</p>
+        <div class="auth-fields">
+          <div>
+            <label class="field-label" for="authEmail">Email</label>
+            <input type="email" id="authEmail" class="text-input auth-input" placeholder="you@example.com" autocomplete="email" />
+          </div>
+          <div>
+            <label class="field-label" for="authPassword">Password</label>
+            <input type="password" id="authPassword" class="text-input auth-input" placeholder="••••••••" autocomplete="current-password" />
+          </div>
+          <div>
+            <label class="field-label" for="authApiUrl">Server URL <span class="optional">(optional)</span></label>
+            <input type="url" id="authApiUrl" class="text-input auth-input" placeholder="http://localhost:3000" />
+          </div>
+          <div class="auth-error hidden" id="authError"></div>
+          <button class="btn-auth-signin" id="authSignInBtn">Sign In</button>
+        </div>
+        <button class="auth-skip-btn" id="authSkipBtn">Continue without account</button>
+      </div>
+
       <!-- ── Header ─────────────────────────────────────────────────────── -->
       <header class="header">
         <div class="header-brand">
@@ -36,6 +65,15 @@
           </button>
         </div>
       </header>
+
+      <!-- ── User bar (shown when authenticated) ───────────────────────── -->
+      <div class="user-bar hidden" id="userBar">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 6a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0ZM4.501 20.118a7.5 7.5 0 0 1 14.998 0A17.933 17.933 0 0 1 12 21.75c-2.676 0-5.216-.584-7.499-1.632Z"/>
+        </svg>
+        <span class="user-bar-email" id="userBarEmail"></span>
+        <button class="user-bar-signout" id="userBarSignOut">Sign out</button>
+      </div>
 
       <!-- ── Tab bar ────────────────────────────────────────────────────── -->
       <div class="tab-bar">
@@ -266,6 +304,12 @@
             <div class="progress-bar-fill" id="progressFill" style="width:0%"></div>
           </div>
           <span class="progress-pct" id="progressPct">0%</span>
+        </div>
+
+        <!-- ── Replay result ────────────────────────────────────────────── -->
+        <div class="replay-result hidden" id="replayResult">
+          <span class="replay-result-icon" id="replayResultIcon"></span>
+          <span class="replay-result-text" id="replayResultText"></span>
         </div>
 
       </div><!-- /panelReplay -->

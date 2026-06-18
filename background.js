@@ -8,6 +8,22 @@ import { sanitizeRecording } from './sanitizer.js';
 
 const replay = new ReplayEngine();
 
+// ── Replay backend sync ──────────────────────────────────────────────────────
+// When a replay finishes, sync its result to the backend if authenticated.
+
+let pendingReplaySync = null; // { remoteReplayId: string } | null
+
+replay.onDone = async (state) => {
+  if (!pendingReplaySync) return;
+  const { remoteReplayId } = pendingReplaySync;
+  pendingReplaySync = null;
+  try {
+    await finalizeRemoteReplay(remoteReplayId, state);
+  } catch (err) {
+    console.warn('[WFR] failed to sync replay result:', err.message);
+  }
+};
+
 // ── In-memory session ────────────────────────────────────────────────────────
 // Lost on service-worker restart, but the popup keeps it alive via 500 ms polls
 // while open. Minimal metadata is also persisted to storage.session so we can
@@ -31,8 +47,7 @@ let session = null;
 chrome.storage.session.get('sessionMeta').then(({ sessionMeta }) => {
   if (!sessionMeta) return;
   // A recording was in progress when the service worker was last stopped.
-  // We lost rawEvents; mark the session as orphaned so the popup can show
-  // a "session interrupted" state. We'll clear it so the popup gets idle state.
+  // We lost rawEvents; clear the stale session so the popup gets idle state.
   chrome.storage.session.remove('sessionMeta');
 });
 
@@ -71,6 +86,107 @@ function persistSessionMeta() {
       },
     })
     .catch(() => {});
+}
+
+// ── API client ───────────────────────────────────────────────────────────────
+
+async function getApiBase() {
+  const { auth } = await chrome.storage.local.get('auth');
+  return auth?.apiBase || 'http://localhost:3000';
+}
+
+async function apiFetch(path, options = {}) {
+  const { auth } = await chrome.storage.local.get('auth');
+  const base = auth?.apiBase || 'http://localhost:3000';
+  const token = auth?.token;
+
+  const res = await fetch(`${base}${path}`, {
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(options.headers || {}),
+    },
+  });
+
+  if (!res.ok) {
+    let msg = `Request failed (${res.status})`;
+    try { const d = await res.json(); msg = d.error?.message || msg; } catch {}
+    throw new Error(msg);
+  }
+
+  return res.json();
+}
+
+// ── Backend sync helpers ─────────────────────────────────────────────────────
+
+async function syncRecordingToBackend(recording) {
+  const { auth } = await chrome.storage.local.get('auth');
+  if (!auth?.token) return null;
+
+  const body = {
+    recording: {
+      name: recording.name,
+      description: recording.description || '',
+      tags: [],
+      metadata: {
+        localId: recording.id,
+        rawEventCount: recording.rawEventCount,
+        recordedAt: recording.startTime,
+      },
+    },
+    version: {
+      activate: true,
+      source: 'extension',
+      schemaVersion: '1.0',
+      title: recording.name,
+      startUrl: recording.tabUrl,
+      steps: recording.steps,
+      recordingJson: {
+        steps: recording.steps,
+        startUrl: recording.tabUrl,
+        name: recording.name,
+        description: recording.description || '',
+      },
+      rawEventSummary: { count: recording.rawEventCount },
+      metadata: { localId: recording.id },
+    },
+  };
+
+  return apiFetch('/api/recordings/import', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
+}
+
+async function createRemoteReplay(remoteRecordingId, versionId) {
+  const data = await apiFetch(`/api/recordings/${remoteRecordingId}/replays`, {
+    method: 'POST',
+    body: JSON.stringify({
+      versionId: versionId || null,
+      status: 'running',
+      startedAt: new Date().toISOString(),
+      environment: { extensionVersion: '1.0.0' },
+    }),
+  });
+  return data.replay;
+}
+
+async function finalizeRemoteReplay(replayId, state) {
+  await apiFetch(`/api/replays/${replayId}`, {
+    method: 'PATCH',
+    body: JSON.stringify({
+      status: state.status || 'failed',
+      endedAt: new Date().toISOString(),
+      durationMs: state.elapsed || null,
+      summary: {
+        finalUrl: state.finalUrl || null,
+        assertionResults: state.assertionResults || [],
+        failedStepIndex: state.failedStepIndex ?? null,
+      },
+      error: state.error ? { message: state.error } : null,
+    }),
+  });
 }
 
 // ── CDP helpers ──────────────────────────────────────────────────────────────
@@ -172,14 +288,32 @@ async function stopRecording(silent = false, nameMeta = {}) {
     rawEvents: snap.rawEvents,
   };
 
-  // Sanitize credentials before writing to storage — headers, POST bodies,
-  // and auth query params must not be persisted (see sanitizer.js for rationale).
+  // Sanitize credentials before writing to storage
   const sanitized = sanitizeRecording(recording);
 
   // Persist to local storage (keep last 50)
   const { recordings = [] } = await chrome.storage.local.get('recordings');
   recordings.unshift(sanitized);
   await chrome.storage.local.set({ recordings: recordings.slice(0, 50) });
+
+  // Sync to backend (fire and forget — don't block the popup)
+  syncRecordingToBackend(sanitized)
+    .then(result => {
+      if (!result) return;
+      chrome.storage.local.get('recordings').then(({ recordings: saved = [] }) => {
+        const idx = saved.findIndex(r => r.id === sanitized.id);
+        if (idx !== -1) {
+          saved[idx] = {
+            ...saved[idx],
+            remoteId: result.recording.id,
+            remoteVersionId: result.version?.id || null,
+            synced: true,
+          };
+          chrome.storage.local.set({ recordings: saved });
+        }
+      });
+    })
+    .catch(err => console.warn('[WFR] recording sync failed:', err.message));
 
   return sanitized;
 }
@@ -200,7 +334,7 @@ function sessionMeta() {
 }
 
 async function getState() {
-  const { recordings = [] } = await chrome.storage.local.get('recordings');
+  const { recordings = [], auth = null } = await chrome.storage.local.get(['recordings', 'auth']);
   const summaries = recordings.map(r => ({
     id: r.id,
     name: r.name,
@@ -209,6 +343,9 @@ async function getState() {
     endTime: r.endTime,
     stepCount: r.stepCount,
     rawEventCount: r.rawEventCount,
+    remoteId: r.remoteId || null,
+    remoteVersionId: r.remoteVersionId || null,
+    synced: r.synced || false,
   }));
   return {
     status: session ? (session.isPaused ? 'paused' : 'recording') : 'idle',
@@ -216,6 +353,7 @@ async function getState() {
     recentRecordings: summaries.slice(0, 5),
     allRecordings: summaries,
     replayState: replay.getState(),
+    auth: auth ? { user: auth.user } : null,
   };
 }
 
@@ -247,17 +385,62 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       case 'GET_LIVE_STEPS':    return getLiveSteps();
       case 'DELETE_RECORDING':  return deleteRecording(message.payload.id);
       case 'GET_RECORDING':     return getRecording(message.payload.id);
+
       case 'START_REPLAY': {
         if (session) throw new Error('Stop the active recording before starting a replay.');
         const rec = await getRecording(message.payload.recordingId);
         if (!rec) throw new Error('Recording not found.');
-        return replay.start(rec, message.payload.options ?? {});
+        const replayResult = await replay.start(rec, message.payload.options ?? {});
+
+        // Create remote replay entry if the recording is synced
+        if (rec.remoteId) {
+          const { auth } = await chrome.storage.local.get('auth');
+          if (auth?.token) {
+            createRemoteReplay(rec.remoteId, rec.remoteVersionId ?? null)
+              .then(remoteReplay => { pendingReplaySync = { remoteReplayId: remoteReplay.id }; })
+              .catch(err => console.warn('[WFR] failed to create remote replay:', err.message));
+          }
+        }
+
+        return replayResult;
       }
+
       case 'PAUSE_REPLAY':      return replay.pause();
       case 'RESUME_REPLAY':     return replay.resume();
       case 'STOP_REPLAY':       return replay.stop();
       case 'STEP_REPLAY':       return replay.stepOnce();
       case 'GET_REPLAY_STATE':  return replay.getState();
+
+      case 'GET_AUTH_STATE': {
+        const { auth = null } = await chrome.storage.local.get('auth');
+        return auth ? { user: auth.user } : null;
+      }
+
+      case 'SIGN_IN': {
+        const { apiBase, email, password } = message.payload;
+        const base = (apiBase || '').trim() || 'http://localhost:3000';
+        const res = await fetch(`${base}/api/auth/token`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, password }),
+        });
+        if (!res.ok) {
+          let msg = 'Login failed';
+          try { const d = await res.json(); msg = d.error?.message || msg; } catch {}
+          throw new Error(msg);
+        }
+        const data = await res.json();
+        const auth = { token: data.token, user: data.user, apiBase: base };
+        await chrome.storage.local.set({ auth });
+        return { user: data.user };
+      }
+
+      case 'SIGN_OUT': {
+        await chrome.storage.local.remove('auth');
+        pendingReplaySync = null;
+        return { ok: true };
+      }
+
       case 'DOM_EVENT': {
         // Validate the message came from the tab we are recording
         if (sender.tab && session && sender.tab.id === session.tabId) {
@@ -266,6 +449,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
         return { ok: true };
       }
+
       default:
         throw new Error('Unknown message type: ' + message.type);
     }

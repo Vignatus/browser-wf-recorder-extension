@@ -8,6 +8,81 @@ async function bg(type, payload) {
   return response.result;
 }
 
+// ══════════════════════════════════════════════════════════════════════════════
+// AUTH
+// ══════════════════════════════════════════════════════════════════════════════
+
+const authScreen    = document.getElementById('authScreen');
+const authEmailEl   = document.getElementById('authEmail');
+const authPasswordEl = document.getElementById('authPassword');
+const authApiUrlEl  = document.getElementById('authApiUrl');
+const authErrorEl   = document.getElementById('authError');
+const authSignInBtn = document.getElementById('authSignInBtn');
+const authSkipBtn   = document.getElementById('authSkipBtn');
+const userBar       = document.getElementById('userBar');
+const userBarEmail  = document.getElementById('userBarEmail');
+const userBarSignOut = document.getElementById('userBarSignOut');
+
+function showAuthScreen() {
+  authScreen.classList.remove('hidden');
+  userBar.classList.add('hidden');
+}
+
+function hideAuthScreen(user) {
+  authScreen.classList.add('hidden');
+  if (user) {
+    userBarEmail.textContent = user.email;
+    userBar.classList.remove('hidden');
+  } else {
+    userBar.classList.add('hidden');
+  }
+}
+
+function setAuthError(msg) {
+  if (msg) {
+    authErrorEl.textContent = msg;
+    authErrorEl.classList.remove('hidden');
+  } else {
+    authErrorEl.classList.add('hidden');
+  }
+}
+
+authSignInBtn.addEventListener('click', async () => {
+  const email    = authEmailEl.value.trim();
+  const password = authPasswordEl.value;
+  const apiBase  = authApiUrlEl.value.trim();
+
+  if (!email || !password) {
+    setAuthError('Please enter your email and password.');
+    return;
+  }
+
+  setAuthError(null);
+  authSignInBtn.disabled = true;
+  authSignInBtn.textContent = 'Signing in…';
+
+  try {
+    const result = await bg('SIGN_IN', { email, password, apiBase });
+    hideAuthScreen(result.user);
+  } catch (err) {
+    setAuthError(err.message);
+  } finally {
+    authSignInBtn.disabled = false;
+    authSignInBtn.textContent = 'Sign In';
+  }
+});
+
+// Allow Enter key from the password or API URL field to trigger sign-in
+authPasswordEl.addEventListener('keydown', e => { if (e.key === 'Enter') authSignInBtn.click(); });
+authApiUrlEl.addEventListener('keydown',  e => { if (e.key === 'Enter') authSignInBtn.click(); });
+
+authSkipBtn.addEventListener('click', () => hideAuthScreen(null));
+
+userBarSignOut.addEventListener('click', async () => {
+  try { await bg('SIGN_OUT'); } catch {}
+  showAuthScreen();
+});
+
 // ── Tab switching ─────────────────────────────────────────────────────────────
 
 const tabRecord  = document.getElementById('tabRecord');
@@ -420,6 +495,9 @@ const progressPct       = document.getElementById('progressPct');
 const screenshotModal   = document.getElementById('screenshotModal');
 const screenshotImg     = document.getElementById('screenshotImg');
 const closeScreenshotModal = document.getElementById('closeScreenshotModal');
+const replayResult      = document.getElementById('replayResult');
+const replayResultIcon  = document.getElementById('replayResultIcon');
+const replayResultText  = document.getElementById('replayResultText');
 
 let replayState = 'idle';   // idle | running | paused | done
 let replayMode  = 'full';   // full | step
@@ -500,6 +578,25 @@ function updateReplayReadiness() {
   modeBtns.querySelectorAll('.mode-btn').forEach(b => {
     b.disabled = !has || b.dataset.mode === 'custom';
   });
+}
+
+// ── Replay result display ─────────────────────────────────────────────────────
+
+function showReplayResult(status) {
+  replayResult.classList.remove('success', 'failed');
+  if (!status) {
+    replayResult.classList.add('hidden');
+    return;
+  }
+  replayResult.classList.remove('hidden');
+  replayResult.classList.add(status);
+  if (status === 'success') {
+    replayResultIcon.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>';
+    replayResultText.textContent = 'Success';
+  } else {
+    replayResultIcon.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>';
+    replayResultText.textContent = 'Failed';
+  }
 }
 
 // ── Replay state UI ───────────────────────────────────────────────────────────
@@ -651,7 +748,14 @@ function stopReplayPoll() {
 function applyReplayState(rs) {
   lastReplayState = rs;
 
-  if (rs.state !== replayState) setReplayStatus(rs.state);
+  if (rs.state !== replayState) {
+    setReplayStatus(rs.state);
+    if (rs.state === 'done') {
+      showReplayResult(rs.status);
+    } else if (rs.state === 'running') {
+      showReplayResult(null); // clear any previous result when replaying again
+    }
+  }
 
   // Append new log entries
   if (rs.log && rs.log.length > renderedLogCount) {
@@ -692,6 +796,7 @@ replayStartBtn.addEventListener('click', async () => {
     renderedLogCount = 0;
     replayLogEmpty.style.display = '';
     replayProgress.classList.add('hidden');
+    showReplayResult(null);
     lastReplayState = null;
   }
 
@@ -725,8 +830,8 @@ replayPauseBtn.addEventListener('click', async () => {
 replayStopBtn.addEventListener('click', async () => {
   try {
     stopReplayPoll();
-    await bg('STOP_REPLAY');
-    setReplayStatus('idle');
+    const rs = await bg('STOP_REPLAY');
+    applyReplayState(rs);
   } catch (err) { alert(err.message); }
 });
 
@@ -744,6 +849,7 @@ clearLogBtn.addEventListener('click', () => {
   renderedLogCount = 0;
   replayLogEmpty.style.display = '';
   replayProgress.classList.add('hidden');
+  showReplayResult(null);
   lastReplayState = null;
   if (replayState === 'idle' || replayState === 'done') setReplayStatus('idle');
 });
@@ -759,6 +865,14 @@ clearLogBtn.addEventListener('click', () => {
 
   try {
     const state = await bg('GET_STATE');
+
+    // Show or hide auth screen based on stored auth state
+    if (state.auth) {
+      hideAuthScreen(state.auth.user);
+    } else {
+      showAuthScreen();
+    }
+
     await syncState(state);
 
     // Sync replay state on open (in case replay was running from before)
