@@ -145,7 +145,7 @@ async function resumeRecording() {
   return sessionMeta();
 }
 
-async function stopRecording(silent = false) {
+async function stopRecording(silent = false, nameMeta = {}) {
   if (!session) {
     if (silent) return null;
     throw new Error('No active session');
@@ -161,8 +161,8 @@ async function stopRecording(silent = false) {
 
   const recording = {
     id: snap.id,
-    name: snap.name,
-    description: snap.description,
+    name: nameMeta?.name?.trim() || snap.name,
+    description: nameMeta?.description ?? snap.description,
     tabUrl: snap.tabUrl,
     startTime: snap.startTime,
     endTime: Date.now(),
@@ -243,7 +243,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       case 'START_RECORDING':   return startRecording(message.payload);
       case 'PAUSE_RECORDING':   return pauseRecording();
       case 'RESUME_RECORDING':  return resumeRecording();
-      case 'STOP_RECORDING':    return stopRecording();
+      case 'STOP_RECORDING':    return stopRecording(false, message.payload ?? {});
       case 'GET_LIVE_STEPS':    return getLiveSteps();
       case 'DELETE_RECORDING':  return deleteRecording(message.payload.id);
       case 'GET_RECORDING':     return getRecording(message.payload.id);

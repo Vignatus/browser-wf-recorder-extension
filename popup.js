@@ -37,8 +37,6 @@ const statusDot      = document.getElementById('statusDot');
 const statusLabel    = document.getElementById('statusLabel');
 const currentTabEl   = document.getElementById('currentTabDisplay');
 const eventCountEl   = document.getElementById('eventCount');
-const recordingName  = document.getElementById('recordingName');
-const recordingDesc  = document.getElementById('recordingDescription');
 const startBtn       = document.getElementById('startBtn');
 const startBtnLabel  = document.getElementById('startBtnLabel');
 const pauseBtn       = document.getElementById('pauseBtn');
@@ -50,6 +48,11 @@ const emptyState     = document.getElementById('emptyState');
 const liveModal      = document.getElementById('liveModal');
 const liveStepsList  = document.getElementById('liveStepsList');
 const closeLiveBtn   = document.getElementById('closeLiveModal');
+const nameModal         = document.getElementById('nameModal');
+const modalRecName      = document.getElementById('modalRecName');
+const modalRecDesc      = document.getElementById('modalRecDesc');
+const nameModalSaveBtn  = document.getElementById('nameModalSaveBtn');
+const nameModalCancelBtn = document.getElementById('nameModalCancelBtn');
 const contextMenu    = document.getElementById('contextMenu');
 const ctxDownload    = document.getElementById('ctxDownload');
 const ctxReplay      = document.getElementById('ctxReplay');
@@ -101,8 +104,6 @@ function setStatus(state, eventCount = 0) {
     viewLiveBtn.classList.add('active');
   }
 
-  recordingName.disabled = isActive;
-  recordingDesc.disabled = isActive;
 }
 
 function renderTab(tab) {
@@ -249,10 +250,6 @@ function stopRecPoll() {
 
 async function syncState(state) {
   setStatus(state.status, state.session?.eventCount ?? 0);
-  if (state.session && recordingName.value === '') {
-    recordingName.value = state.session.name;
-    recordingDesc.value = state.session.description || '';
-  }
   renderRecordings(state.recentRecordings || []);
   if (state.status !== 'idle') startRecPoll();
 }
@@ -262,10 +259,7 @@ async function syncState(state) {
 startBtn.addEventListener('click', async () => {
   try {
     if (recordingState === 'idle') {
-      const name = recordingName.value.trim() || 'Untitled workflow';
       await bg('START_RECORDING', {
-        name,
-        description: recordingDesc.value.trim(),
         tabId:  currentTab.id,
         tabUrl: currentTab.url,
       });
@@ -293,17 +287,41 @@ pauseBtn.addEventListener('click', async () => {
   } catch (err) { alert(err.message); }
 });
 
-stopBtn.addEventListener('click', async () => {
+stopBtn.addEventListener('click', () => {
+  stopRecPoll();
+  stopBtn.disabled = true;
+  modalRecName.value = '';
+  modalRecDesc.value = '';
+  nameModal.classList.remove('hidden');
+  setTimeout(() => modalRecName.focus(), 50);
+});
+
+nameModalSaveBtn.addEventListener('click', async () => {
+  const name = modalRecName.value.trim() || 'Untitled workflow';
+  const description = modalRecDesc.value.trim();
+  nameModal.classList.add('hidden');
   try {
-    stopRecPoll();
-    const recording = await bg('STOP_RECORDING');
+    const recording = await bg('STOP_RECORDING', { name, description });
     setStatus('idle', 0);
-    recordingName.value = '';
-    recordingDesc.value = '';
     downloadJson(recording);
     const state = await bg('GET_STATE');
     renderRecordings(state.recentRecordings || []);
-  } catch (err) { alert(err.message); }
+  } catch (err) {
+    alert(err.message);
+    stopBtn.disabled = false;
+    startRecPoll();
+  }
+});
+
+nameModalCancelBtn.addEventListener('click', () => {
+  nameModal.classList.add('hidden');
+  stopBtn.disabled = false;
+  startRecPoll(); // resume polling — still recording
+});
+
+// Enter key in name field triggers save
+modalRecName.addEventListener('keydown', e => {
+  if (e.key === 'Enter') nameModalSaveBtn.click();
 });
 
 viewLiveBtn.addEventListener('click', async () => {
@@ -453,6 +471,7 @@ async function refreshReplayRecordingList() {
 
 replayRecSelect.addEventListener('change', () => {
   updateRecInfo(replayRecSelect.value);
+  updateReplayReadiness();
 });
 
 function updateRecInfo(id) {
@@ -467,6 +486,20 @@ function updateRecInfo(id) {
     <div class="replay-rec-info-name">${escHtml(rec.name)}</div>
     <div class="replay-rec-info-meta">${escHtml(host)} &bull; ${rec.stepCount ?? 0} steps &bull; ${ago}</div>`;
   replayRecInfo.classList.remove('hidden');
+}
+
+// ── Replay readiness gating ───────────────────────────────────────────────────
+// All controls except the recording selector are disabled until a recording is chosen.
+
+function updateReplayReadiness() {
+  if (replayState !== 'idle') return; // active/done states are fully managed by setReplayStatus
+  const has = !!replayRecSelect.value;
+  replayStartBtn.disabled = !has;
+  replayTarget.disabled   = !has;
+  replaySpeed.disabled    = !has;
+  modeBtns.querySelectorAll('.mode-btn').forEach(b => {
+    b.disabled = !has || b.dataset.mode === 'custom';
+  });
 }
 
 // ── Replay state UI ───────────────────────────────────────────────────────────
@@ -508,6 +541,9 @@ function setReplayStatus(state) {
   if (!isActive && state !== 'done') {
     replayProgress.classList.add('hidden');
   }
+
+  // Re-apply the readiness gate: in idle state, controls stay disabled if no recording is selected
+  updateReplayReadiness();
 }
 
 // ── Replay log rendering ──────────────────────────────────────────────────────
