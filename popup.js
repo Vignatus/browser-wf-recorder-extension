@@ -446,7 +446,11 @@ ctxDelete.addEventListener('click', async () => {
 });
 
 document.getElementById('viewAllBtn').addEventListener('click', () => {});
-document.getElementById('openDashboardBtn').addEventListener('click', () => {});
+document.getElementById('openDashboardBtn').addEventListener('click', async () => {
+  const { auth } = await chrome.storage.local.get('auth');
+  const url = (auth?.apiBase || 'http://localhost:3000').replace(/\/$/, '') + '/dashboard';
+  chrome.tabs.create({ url });
+});
 
 // ══════════════════════════════════════════════════════════════════════════════
 // REPLAY TAB
