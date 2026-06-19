@@ -45,6 +45,12 @@ export function normalizeEvents(rawEvents) {
     //   • each keystroke arrives within TYPE_MERGE_WINDOW of the previous one
     //   • no other event type (click, navigation, …) interrupts the run
     // The final value wins. strategy tells the replay engine how to re-execute.
+    // Radio inputs are handled by the dom:click → select_radio collapse below.
+    if (evt.type === 'dom:input' && evt.data?.inputType === 'radio') {
+      i++;
+      continue;
+    }
+
     if (evt.type === 'dom:input') {
       const key      = _selectorKey(evt);
       const strategy = _inputStrategy(evt);
@@ -113,6 +119,41 @@ export function normalizeEvents(rawEvents) {
 
     // ── Click ────────────────────────────────────────────────────────────────
     if (evt.type === 'dom:click') {
+      // Radio button: click + input + change fire as a burst — collapse to select_radio.
+      // Look ahead past any dom:input radio events on the same element for the dom:change.
+      if (evt.data.target?.inputType === 'radio') {
+        const sel = _selectorKey(evt);
+        let j = i + 1;
+        let changeEvt = null;
+        while (j < rawEvents.length) {
+          const next = rawEvents[j];
+          if (next.type === 'dom:input' && next.data?.inputType === 'radio' && _selectorKey(next) === sel) {
+            j++;
+            continue;
+          }
+          if (next.type === 'dom:change' && next.data?.inputType === 'radio' && _selectorKey(next) === sel) {
+            changeEvt = next;
+            j++;
+            break;
+          }
+          break;
+        }
+        if (changeEvt) {
+          steps.push({
+            id: uid(),
+            stepType: 'select_radio',
+            timestamp: evt.timestamp,
+            url: evt.tabUrl,
+            selector: changeEvt.data.target?.primarySelector ?? changeEvt.data.selector,
+            label: changeEvt.data.label,
+            value: changeEvt.data.value,
+            target: changeEvt.data.target ?? null,
+          });
+          i = j;
+          continue;
+        }
+      }
+
       steps.push({
         id: uid(),
         stepType: 'click',

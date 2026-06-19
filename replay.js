@@ -223,8 +223,8 @@ export class ReplayEngine {
         case 'navigate':               await this._doNavigate(step); break;
         case 'click':                  await this._doClick(step);    break;
         case 'type':                   await this._doType(step);     break;
-        case 'select':
-        case 'select_radio':           await this._doSelect(step);   break;
+        case 'select':                 await this._doSelect(step);   break;
+        case 'select_radio':           await this._doRadio(step);    break;
         case 'check':                  await this._doCheck(step);    break;
         case 'scroll':                 await this._doScroll(step);   break;
         case 'network_request':
@@ -259,8 +259,8 @@ export class ReplayEngine {
       case 'navigate':     return 'Navigated to ' + h(step.url);
       case 'click':        return 'Clicked ' + (step.label ? `"${step.label}"` : (t?.text || t?.ariaLabel || step.selector));
       case 'type':         return `Typed "${step.value || ''}" into ${step.label || t?.placeholder || step.selector}`;
-      case 'select':
-      case 'select_radio': return 'Selected "' + (step.metadata?.selectedText || step.value || '') + '"';
+      case 'select':       return 'Selected "' + (step.metadata?.selectedText || step.value || '') + '"';
+      case 'select_radio': return `Selected radio "${step.label || step.value || ''}"`;
       case 'check':        return (step.value === 'checked' ? 'Checked' : 'Unchecked') + ' ' + (step.label || step.selector);
       case 'scroll':       return `Scrolled to (${step.metadata?.x ?? 0}, ${step.metadata?.y ?? 0})`;
       case 'network_request': return (step.metadata?.method || 'GET') + ' ' + (step.metadata?.requestUrl || '');
@@ -382,6 +382,27 @@ export class ReplayEngine {
 
     if (!ok) throw new Error(
       `Checkbox not found\n  selectors: [${selectors.join(', ')}]`
+    );
+  }
+
+  async _doRadio(step) {
+    const selectors = _selectorList(step);
+
+    const ok = await this._runInPage((selectors) => {
+      for (const sel of selectors) {
+        let el;
+        try { el = document.querySelector(sel); } catch { continue; }
+        if (!el) continue;
+        el.checked = true;
+        el.dispatchEvent(new Event('input',  { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        return true;
+      }
+      return false;
+    }, [selectors]);
+
+    if (!ok) throw new Error(
+      `Radio button not found\n  selectors: [${selectors.join(', ')}]`
     );
   }
 
